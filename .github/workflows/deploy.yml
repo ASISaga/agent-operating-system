@@ -1,39 +1,96 @@
-name: Update Submodules
+# Deploy workflow for ASISaga/agent-operating-system
+#
+# Copy this file to .github/workflows/deploy.yml in the agent-operating-system repository.
+#
+# Prerequisites — run once from ASISaga/aos-infrastructure:
+#   1. Deploy infrastructure:  workflow_dispatch on infrastructure-deploy.yml
+#      The Bicep templates create the Function App and its User-Assigned Managed
+#      Identity, then store the identity clientId in Key Vault automatically.
+#   2. Create GitHub Environments in THIS repo: dev, staging, prod
+#   3. Add the following secrets to each environment:
+#        AZURE_CLIENT_ID     — Managed identity client ID.
+#                              Retrieve from Key Vault after infrastructure provisioning:
+#                                python3 - <<'PYEOF'
+#                                import os
+#                                from azure.identity import DefaultAzureCredential
+#                                from azure.keyvault.secrets import SecretClient
+#                                cred = DefaultAzureCredential()
+#                                secret = SecretClient(vault_url="https://<kv-name>.vault.azure.net", credential=cred)
+#                                print(secret.get_secret("clientid-agent-operating-system-<env>").value)
+#                                PYEOF
+#                              The Key Vault name is shown in the infrastructure deploy run summary.
+#                              On the first run, the infra_provisioned repository_dispatch event
+#                              triggers this workflow automatically with the client ID in the payload.
+#        AZURE_TENANT_ID     — Azure AD tenant ID
+#        AZURE_SUBSCRIPTION_ID — Azure subscription ID
+#   4. Optionally add variable AZURE_RESOURCE_GROUP (defaults to rg-aos-<env>)
+#
+# See deployment/workflow-templates/README.md in ASISaga/aos-infrastructure for full setup guide.
+
+name: Deploy to Azure
 
 on:
+  push:
+    branches:
+      - main
+  release:
+    types:
+      - published
   workflow_dispatch:
     inputs:
-      submodule:
-        description: 'Submodule to update (leave blank for all)'
-        required: false
-        type: string
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+        default: dev
+  # Triggered automatically by ASISaga/aos-infrastructure after successful
+  # Function App provisioning (Bicep Phase 4).  The payload includes the
+  # environment name and Key Vault URL so that this workflow can retrieve
+  # AZURE_CLIENT_ID without any manual secret setup.
+  repository_dispatch:
+    types:
+      - infra_provisioned
 
 permissions:
-  contents: write
+  id-token: write
+  contents: read
 
 jobs:
-  update-submodules:
-    name: Update submodule references
+  resolve-env:
+    name: Resolve environment
     runs-on: ubuntu-latest
-
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      key_vault_url: ${{ steps.env.outputs.key_vault_url }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          submodules: true
-          fetch-depth: 0
-
-      - name: Update submodules
+      - name: Resolve deploy environment
+        id: env
         run: |
-          if [ -n "${{ github.event.inputs.submodule }}" ]; then
-            git submodule update --remote "${{ github.event.inputs.submodule }}"
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            echo "environment=${{ github.event.client_payload.environment }}" >> "$GITHUB_OUTPUT"
+            echo "key_vault_url=${{ github.event.client_payload.key_vault_url }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "environment=${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
+            echo "key_vault_url=" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            echo "environment=prod" >> "$GITHUB_OUTPUT"
+            echo "key_vault_url=" >> "$GITHUB_OUTPUT"
           else
-            git submodule update --remote
+            echo "environment=dev" >> "$GITHUB_OUTPUT"
+            echo "key_vault_url=" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Commit updated submodule references
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git diff --quiet && git diff --staged --quiet || \
-            git commit -am "chore: update submodule references" && git push
+  deploy:
+    name: Deploy
+    needs: resolve-env
+    environment: ${{ needs.resolve-env.outputs.environment }}
+    uses: ASISaga/aos-infrastructure/.github/workflows/deploy-function-app.yml@main
+    with:
+      app-name: 'agent-operating-system'
+      environment: ${{ needs.resolve-env.outputs.environment }}
+      key-vault-url: ${{ needs.resolve-env.outputs.key_vault_url }}
+    secrets: inherit
