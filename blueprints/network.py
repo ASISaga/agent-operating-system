@@ -20,18 +20,18 @@ class NetworkFunctions:
     """Handlers for Network Discovery endpoints."""
 
     @staticmethod
-    async def discover_peers(req: func.HttpRequest) -> func.HttpResponse:  # noqa: ARG004
+    async def discover_peers(req: func.HttpRequest) -> func.HttpResponse:  # noqa: ARG001
         """Discover peer applications."""
         return _make_response(dispatcher.discover_peers())
 
     @staticmethod
-    async def join_network(req: func.HttpRequest) -> func.HttpResponse:  # noqa: ARG004
+    async def join_network(req: func.HttpRequest) -> func.HttpResponse:  # noqa: ARG001
         """Join a network."""
         network_id = req.route_params.get("network_id", "")
         return _make_response(dispatcher.join_network(network_id))
 
     @staticmethod
-    async def list_networks(req: func.HttpRequest) -> func.HttpResponse:  # noqa: ARG004
+    async def list_networks(req: func.HttpRequest) -> func.HttpResponse:  # noqa: ARG001
         """List available networks."""
         return _make_response(dispatcher.list_networks())
 

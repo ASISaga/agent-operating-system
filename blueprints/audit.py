@@ -35,7 +35,7 @@ class AuditFunctions:
         return _make_response(dispatcher.get_decision_history(orch_id=orch_id, agent_id=agent_id))
 
     @staticmethod
-    async def get_audit_trail(req: func.HttpRequest) -> func.HttpResponse:  # noqa: ARG004
+    async def get_audit_trail(req: func.HttpRequest) -> func.HttpResponse:  # noqa: ARG001
         """Get the audit trail."""
         return _make_response(dispatcher.get_audit_trail())
 

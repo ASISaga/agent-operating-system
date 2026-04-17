@@ -18,7 +18,7 @@ class HealthFunctions:
     """Handler for the health-check endpoint."""
 
     @staticmethod
-    async def health(req: func.HttpRequest) -> func.HttpResponse:  # noqa: ARG004
+    async def health(req: func.HttpRequest) -> func.HttpResponse:  # noqa: ARG001
         """Health check endpoint."""
         return _make_response(dispatcher.health())
 

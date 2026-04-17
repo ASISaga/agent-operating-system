@@ -43,7 +43,7 @@ class AnalyticsFunctions:
         return _make_response(dispatcher.create_kpi(body))
 
     @staticmethod
-    async def get_kpi_dashboard(req: func.HttpRequest) -> func.HttpResponse:  # noqa: ARG004
+    async def get_kpi_dashboard(req: func.HttpRequest) -> func.HttpResponse:  # noqa: ARG001
         """Get the KPI dashboard."""
         return _make_response(dispatcher.get_kpi_dashboard())
 
