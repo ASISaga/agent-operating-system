@@ -1,0 +1,7 @@
+azure-functions
+azure-functions
+azure-servicebus
+agent-framework-azurefunctions
+aos-dispatcher @ git+https://github.com/ASISaga/aos-dispatcher.git
+aos-kernel @ git+https://github.com/ASISaga/aos-kernel.git
+aos-intelligence @ git+https://github.com/ASISaga/aos-intelligence.git

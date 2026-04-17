@@ -1,6 +1,6 @@
-# Deploy workflow for ASISaga/agent-operating-system
+# Deploy workflow for ASISaga/business-infinity
 #
-# Copy this file to .github/workflows/deploy.yml in the agent-operating-system repository.
+# Copy this file to .github/workflows/deploy.yml in the business-infinity repository.
 #
 # Prerequisites — run once from ASISaga/aos-infrastructure:
 #   1. Deploy infrastructure:  workflow_dispatch on infrastructure-deploy.yml
@@ -16,7 +16,7 @@
 #                                from azure.keyvault.secrets import SecretClient
 #                                cred = DefaultAzureCredential()
 #                                secret = SecretClient(vault_url="https://<kv-name>.vault.azure.net", credential=cred)
-#                                print(secret.get_secret("clientid-agent-operating-system-<env>").value)
+#                                print(secret.get_secret("clientid-business-infinity-<env>").value)
 #                                PYEOF
 #                              The Key Vault name is shown in the infrastructure deploy run summary.
 #                              On the first run, the infra_provisioned repository_dispatch event
@@ -46,7 +46,7 @@ on:
           - dev
           - staging
           - prod
-        default: dev
+        default: staging
   # Triggered automatically by ASISaga/aos-infrastructure after successful
   # Function App provisioning (Bicep Phase 4).  The payload includes the
   # environment name and Key Vault URL so that this workflow can retrieve
@@ -60,37 +60,260 @@ permissions:
   contents: read
 
 jobs:
+  # Phase 1: Determine the target environment
+  #
+  # A dedicated job resolves the environment before the deploy job runs so that
+  # the deploy job can reference needs.resolve-env.outputs.environment in its
+  # environment: key.  Dynamic environment: is supported for regular step-based
+  # jobs (unlike reusable-workflow jobs, where it caused planning-time failures).
+
   resolve-env:
-    name: Resolve environment
+    name: Resolve target environment
     runs-on: ubuntu-latest
     outputs:
       environment: ${{ steps.env.outputs.environment }}
       key_vault_url: ${{ steps.env.outputs.key_vault_url }}
+
     steps:
-      - name: Resolve deploy environment
+      - name: Determine target environment and Key Vault URL
         id: env
+        shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
-            echo "environment=${{ github.event.client_payload.environment }}" >> "$GITHUB_OUTPUT"
-            echo "key_vault_url=${{ github.event.client_payload.key_vault_url }}" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "environment=${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
-            echo "key_vault_url=" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.event_name }}" == "release" ]]; then
-            echo "environment=prod" >> "$GITHUB_OUTPUT"
-            echo "key_vault_url=" >> "$GITHUB_OUTPUT"
-          else
-            echo "environment=dev" >> "$GITHUB_OUTPUT"
-            echo "key_vault_url=" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+
+          echo "::group::Trigger context"
+          echo "  Event:  ${{ github.event_name }}"
+          echo "  Actor:  ${{ github.actor }}"
+          echo "  Ref:    ${{ github.ref }}"
+          echo "  SHA:    ${{ github.sha }}"
+          echo "::endgroup::"
+
+          ENV=""
+          KV_URL=""
+
+          case "${{ github.event_name }}" in
+            push)
+              ENV="staging"
+              KV_URL=""
+              echo "::notice::Push to main detected — targeting staging environment"
+              ;;
+            release)
+              ENV="prod"
+              KV_URL=""
+              echo "::notice::Release published — targeting prod environment"
+              ;;
+            workflow_dispatch)
+              ENV="${{ inputs.environment }}"
+              KV_URL=""
+              echo "::notice::Manual dispatch — targeting ${ENV} environment"
+              ;;
+            repository_dispatch)
+              ENV="${{ github.event.client_payload.environment }}"
+              KV_URL="${{ github.event.client_payload.key_vault_url }}"
+              echo "::notice::Infrastructure provisioned — targeting ${ENV} environment"
+              if [[ -n "${KV_URL}" ]]; then
+                echo "::notice::Key Vault URL supplied: ${KV_URL}"
+              fi
+              ;;
+            *)
+              echo "::error::Unknown event type '${{ github.event_name }}' — cannot determine target environment"
+              exit 1
+              ;;
+          esac
+
+          if [[ -z "${ENV}" ]]; then
+            echo "::error::Target environment resolved to empty string — check event payload"
+            exit 1
           fi
 
+          if [[ "${ENV}" != "dev" && "${ENV}" != "staging" && "${ENV}" != "prod" ]]; then
+            echo "::error::Invalid environment '${ENV}' — must be dev, staging, or prod"
+            exit 1
+          fi
+
+          echo "environment=${ENV}" >> "$GITHUB_OUTPUT"
+          echo "key_vault_url=${KV_URL}" >> "$GITHUB_OUTPUT"
+          echo "Resolved target environment: ${ENV}"
+
+  # Phase 2: Deploy
+
   deploy:
-    name: Deploy
+    name: Deploy (${{ needs.resolve-env.outputs.environment }})
     needs: resolve-env
+    runs-on: ubuntu-latest
     environment: ${{ needs.resolve-env.outputs.environment }}
-    uses: ASISaga/aos-infrastructure/.github/workflows/deploy-function-app.yml@main
-    with:
-      app-name: 'agent-operating-system'
-      environment: ${{ needs.resolve-env.outputs.environment }}
-      key-vault-url: ${{ needs.resolve-env.outputs.key_vault_url }}
-    secrets: inherit
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log deployment context
+        shell: bash
+        run: |
+          echo "::group::Deployment context"
+          echo "  Application:  business-infinity"
+          echo "  Environment:  ${{ needs.resolve-env.outputs.environment }}"
+          echo "  Python:       3.11"
+          echo "  Ref:          ${{ github.ref }}"
+          echo "  SHA:          ${{ github.sha }}"
+          echo "  Triggered by: ${{ github.actor }}"
+          echo "  Event:        ${{ github.event_name }}"
+          if [[ -n "${{ needs.resolve-env.outputs.key_vault_url }}" ]]; then
+            echo "  Key Vault:    ${{ needs.resolve-env.outputs.key_vault_url }}"
+          else
+            echo "  Key Vault:    (using GitHub environment secret AZURE_CLIENT_ID)"
+          fi
+          echo "::endgroup::"
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install Azure SDK and build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::Installing Azure SDK and build tools"
+          pip install --upgrade pip
+          pip install \
+            azure-identity \
+            azure-keyvault-secrets \
+            azure-mgmt-web
+          echo "::endgroup::"
+
+      - name: Install application dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f requirements.txt ]]; then
+            echo "::error::requirements.txt not found — cannot install application dependencies"
+            exit 1
+          fi
+          echo "::group::Installing application dependencies into .python_packages"
+          # Flex Consumption requires client-side packaging: all deps must be
+          # bundled into .python_packages/lib/site-packages on a Linux runner
+          # so that binary extensions are compatible with the Azure host OS.
+          pip install \
+            --upgrade \
+            --target=".python_packages/lib/site-packages" \
+            --requirement requirements.txt \
+            --verbose
+          echo "--- Installed packages ---"
+          pip list --path=".python_packages/lib/site-packages" 2>/dev/null || true
+          echo "::endgroup::"
+
+      # Bootstrap login is only needed when the infra_provisioned event supplies
+      # a Key Vault URL so that this run can retrieve the managed-identity client
+      # ID without a pre-existing GitHub environment secret.
+      - name: Azure Login (OIDC — bootstrap for Key Vault)
+        if: needs.resolve-env.outputs.key_vault_url != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Retrieve AZURE_CLIENT_ID from Key Vault
+        id: kv_client_id
+        if: needs.resolve-env.outputs.key_vault_url != ''
+        shell: bash
+        env:
+          KV_URL: ${{ needs.resolve-env.outputs.key_vault_url }}
+          SECRET_NAME: clientid-business-infinity-${{ needs.resolve-env.outputs.environment }}
+          FALLBACK_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+          echo "::group::Retrieving AZURE_CLIENT_ID from Key Vault"
+          echo "  Key Vault URL: ${KV_URL}"
+          echo "  Secret name:   ${SECRET_NAME}"
+
+          CLIENT_ID=$(python3 .github/scripts/get_kv_client_id.py)
+
+          if [[ -n "${CLIENT_ID}" ]]; then
+            echo "client_id=${CLIENT_ID}" >> "$GITHUB_OUTPUT"
+            echo "  AZURE_CLIENT_ID retrieved from Key Vault"
+          else
+            echo "client_id=${FALLBACK_CLIENT_ID}" >> "$GITHUB_OUTPUT"
+            echo "  Key Vault secret not found; using GitHub environment secret AZURE_CLIENT_ID"
+          fi
+          echo "::endgroup::"
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          # Use the client ID retrieved from Key Vault when available; otherwise
+          # fall back to the GitHub environment secret.  The kv_client_id step
+          # always sets client_id to a non-empty value (either from KV or from
+          # FALLBACK_CLIENT_ID), so the || here only applies when the step was
+          # skipped entirely (key_vault_url was empty).
+          client-id: >-
+            ${{
+              steps.kv_client_id.outputs.client_id != ''
+              && steps.kv_client_id.outputs.client_id
+              || secrets.AZURE_CLIENT_ID
+            }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve Function App name
+        id: resolve
+        shell: bash
+        env:
+          DEPLOY_ENV: ${{ needs.resolve-env.outputs.environment }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+        run: |
+          set -euo pipefail
+          export RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-rg-aos-${DEPLOY_ENV}}"
+          export PREFIX="func-business-infinity-${DEPLOY_ENV}-"
+
+          echo "::group::Resolving Azure Function App"
+          echo "  Subscription:   ${AZURE_SUBSCRIPTION_ID}"
+          echo "  Resource group: ${RESOURCE_GROUP}"
+          echo "  Name prefix:    ${PREFIX}"
+
+          FUNCTION_APP=$(python3 .github/scripts/resolve_function_app.py) || {
+            echo "::error::Run the infrastructure deployment from ASISaga/aos-infrastructure first."
+            echo "::endgroup::"
+            exit 1
+          }
+
+          echo "function_app=${FUNCTION_APP}"     >> "$GITHUB_OUTPUT"
+          echo "resource_group=${RESOURCE_GROUP}" >> "$GITHUB_OUTPUT"
+          echo "  Target: ${FUNCTION_APP} (resource group: ${RESOURCE_GROUP})"
+          echo "::endgroup::"
+
+      - name: Configure PYTHONPATH for Flex Consumption
+        shell: bash
+        env:
+          FUNCTION_APP: ${{ steps.resolve.outputs.function_app }}
+          RESOURCE_GROUP: ${{ steps.resolve.outputs.resource_group }}
+        run: |
+          set -euo pipefail
+          echo "::group::Setting PYTHONPATH app setting"
+          # Flex Consumption mounts code as a read-only SquashFS image; the
+          # Python worker must find pre-bundled packages at this exact path.
+          az functionapp config appsettings set \
+            --name "${FUNCTION_APP}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --settings "PYTHONPATH=/home/site/wwwroot/.python_packages/lib/site-packages"
+          echo "  PYTHONPATH=/home/site/wwwroot/.python_packages/lib/site-packages"
+          echo "::endgroup::"
+
+      - name: Deploy to Azure Function App
+        uses: azure/functions-action@v1
+        with:
+          app-name: ${{ steps.resolve.outputs.function_app }}
+          package: .
+          respect-funcignore: true
+          scm-do-build-during-deployment: false
+
+      - name: Report deployment success
+        shell: bash
+        run: |
+          echo "::notice::business-infinity deployed successfully"
+          echo "::notice::Environment:    ${{ needs.resolve-env.outputs.environment }}"
+          echo "::notice::Function App:   ${{ steps.resolve.outputs.function_app }}"
+          echo "::notice::Resource Group: ${{ steps.resolve.outputs.resource_group }}"
